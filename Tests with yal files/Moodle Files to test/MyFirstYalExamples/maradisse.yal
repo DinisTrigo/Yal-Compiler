@@ -1,0 +1,15 @@
+module example
+{
+	m;
+	function m=f1(m) {
+	// in this function we will
+	// never have the possibility
+	// to access the attribute m
+	m=m+3;
+	}
+	
+	function main()
+	{
+		a = f1(2);
+	}
+}

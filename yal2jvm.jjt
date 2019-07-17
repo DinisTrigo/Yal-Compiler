@@ -1,0 +1,862 @@
+options
+{
+  LOOKAHEAD= 1;
+  MULTI = true;
+  NODE_SCOPE_HOOK=true;
+}
+
+PARSER_BEGIN(Scanner)
+package Yal2Jvm;
+import java.io.*;
+import java.util.HashSet;
+import Yal2Jvm.CodeGeneration.IR.ControlFlowGraph;
+
+public class Scanner
+{
+  private static boolean parse_error = false;
+
+     /**
+      * Main function that receives and parses the command line arguments and creates a new instance of this class to perform the compiling of the program.
+      * @param args An array of String containing the command line arguments given to the program. Usage is correctly described when the program is invoked.
+      * @throws ParseException Exception throw when the parser encounters a problem.
+      */
+     public static void main(String[] args) throws ParseException
+     {
+         if (args.length == 0)
+         {
+             System.out.println("Insufficient number of arguments for Yal2Jvm compiler. Please supply at least one argument.");
+             displayUsage();
+             return;
+         }
+
+         int indexOfO = Arrays.asList(args).indexOf("-o");
+         boolean optimizationsOn = indexOfO != -1;
+         globals.constant_folding = optimizationsOn;
+         globals.constant_propagation = optimizationsOn;
+
+         int indexOfR = indexThatMatchesRegex(args, "-r=([^\\s]+)");
+         if (indexOfR != -1)
+         {
+             String optionR = args[indexOfR];
+             String numberOfRegistersStr = optionR.substring(3, optionR.length());
+             Integer numberOfRegisters = Integer.parseInt(numberOfRegistersStr);
+             numberOfRegisters = validateNumberOfRegisters(numberOfRegisters);
+             if (numberOfRegisters == null)
+                 return;
+
+             globals.numberOfAvailableRegisters = numberOfRegisters;
+         }
+         else
+             globals.numberOfAvailableRegisters = 255;
+
+         Integer fileNameIndex = getFileNameIndex(indexOfO, indexOfR);
+         if (fileNameIndex >= args.length)
+         {
+             System.out.println("You must supply the file name containing the yal code to be compiled as command line argument to the program.");
+             displayUsage();
+             return;
+         }
+
+         String file_name = args[fileNameIndex];
+         InputStream file = null;
+         try
+         {
+             file = new FileInputStream(file_name);
+         } catch (FileNotFoundException e)
+         {
+             System.out.println("The file corresponding to the filename specified as argument could be found. Please verify the filename given.");
+             displayUsage();
+             return;
+         }
+         Scanner s = new Scanner(file);
+         s.compileFile();
+     }
+
+     /**
+      * Axiliary function for parsing the arguments. Ir returns the index of the array received as first parameter that matches the regular expression received as second parameter.
+      * @param array An array to search for the regular expression match.
+      * @param regex The regular expression to match on the given array.
+      * @return The index of the array which matches the regular expression received as parameter. Returns -1 if no index matches.
+      */
+     private static int indexThatMatchesRegex(String[] array, String regex)
+     {
+         for (int i = 0; i < array.length; i++)
+         {
+             if (array[i].matches(regex))
+                 return i;
+         }
+
+         return -1;
+     }
+
+     /**
+      * Returns the index of the filename by exclusion. It assumes the file is always the lowest index possible, not considering the indexes that are already taken by the -o and -r argument options.
+      * This is used to provide the user with a lot of usage tolerance, allowing the arguments can be specified in any order without any problem.
+      * @param indexOfO An int value representing the index of the -o option.
+      * @param indexOfR An int value representing the index of the -r option.
+      * @return An int value representing the index of the string representing the filename.
+      */
+     static Integer getFileNameIndex(int indexOfO, int indexOfR)
+     {
+         HashSet<Integer> optionalIndexes = new HashSet<>();
+         optionalIndexes.add(indexOfO);
+         optionalIndexes.add(indexOfR);
+
+         HashSet<Integer> possibleIndexes = new HashSet<>();
+         possibleIndexes.add(0);
+         possibleIndexes.add(1);
+         possibleIndexes.add(2);
+         possibleIndexes.removeAll(optionalIndexes); //get the index of the input file by exclusion, allowing any possible order of arguments
+
+         return Collections.min(possibleIndexes);
+     }
+
+     /**
+      * This function validates the argument that represents the available number of registers. Ensure that the number is between 0 and 255.
+      * @param numberOfRegisters The number of registers provided by the user, to be validated by this function.
+      * @return An Integer value representing the number of registers fixed, if it needs to be fixed. This is for the case the user provides 0, it will be adapted to 255.
+      */
+     static Integer validateNumberOfRegisters(Integer numberOfRegisters)
+     {
+         if (numberOfRegisters > 255)
+         {
+             System.out.println("Number of registers to use specified is too high. Please specify a number between 0 and 255.");
+             displayUsage();
+             return null;
+         }
+         else if (numberOfRegisters < 0)
+         {
+             System.out.println("Number of registers to use cannot be less than 0. Please specify a valid number");
+             displayUsage();
+             return null;
+         }
+         else if (numberOfRegisters == 0)
+             numberOfRegisters = 255;
+         return numberOfRegisters;
+     }
+
+     /**
+      * Displays usage information to run the program.
+      */
+     private static void displayUsage()
+     {
+         System.out.println("Usage: java yal2jvm [-r=<num>] [-o] <input_file.yal>");
+         System.out.println("or");
+         System.out.println("java –jar yal2jvm.jar [-r=<num>] [-o] <input_file.yal>");
+         System.out.println("Where: <input_file.yal> is the yal module we would like to compile.");
+         System.out.println("The “–r” option tells the compiler to use only the first <num> local variables of the JVM when assigning the local variables used in each yal function to the local JVM variables. Without the “–r” option (similar to –r=0), the compiler will use the available JVM local variables to store the local variables used in each yal function.");
+         System.out.println("num is a number between 0 and 255 that specifies how much registers the compiler should use. 0 will use the maximum number of registers: 255");
+         System.out.println("With the “–o” option, the compiler will perform a set of code optimizations");
+     }
+
+     /**
+      * This function performs all necessary actions to compile a file. Created the necessary classes that implement the needed functionalities and calls its methods, causing the whole compiling process to be executed.
+      * @throws ParseException Exception throw when the parser encounters a problem.
+      */
+     void compileFile() throws ParseException
+     {
+         SimpleNode root = Module();
+         if (!parse_error)
+         {
+             root.dump("");
+             ModuleST moduleST = new ModuleST();
+             root.fillStFirstPass(moduleST);
+             root.fillStSecondPass(moduleST);
+             HashSet<String> map = new HashSet<String>();
+             root.verifyInitialization(map, moduleST);
+             root.verifyOperatorSyntax(moduleST, false);
+             if (moduleST.codeHasSemanticErrors())
+             {
+                 System.out.println("Compilation failed with " + moduleST.getNumberOfSemanticErrors() + " semantic errors. Errors' descriptions shown above.");
+                 return;
+             }
+             root.fillIRFirstPass(moduleST, null);
+             ControlFlowGraph cfg = ((ASTModule) root).cfg;
+             root.fillIRSecondPass(moduleST, cfg, null);
+             if (moduleST.codeHasSemanticErrors())
+             {
+                 System.out.println("Compilation failed with " + moduleST.getNumberOfSemanticErrors() + " semantic errors. Errors' descriptions shown above.");
+                 return;
+             }
+             GlobalRegisterAllocator registerAllocator = new GlobalRegisterAllocator(cfg, globals.numberOfAvailableRegisters);
+             if (!registerAllocator.performRegisterAllocation())
+                 return;
+             String instructions = cfg.getInstructions();
+             writeJVMCodeToFile(((ASTModule) root).moduleName, instructions);
+             System.out.println("The program has compiled has successfully. Assembly code saved to file.");
+         }
+     }
+
+     /**
+      * Writes the generated JVM code to a file. The code to be written is received as parameter.
+      * @param moduleName A String representing the name of the module. This is used to set the name of the file to which the assembly code will be written to.
+      * @param instructions A String containing the JVM instructions to be written to the file.
+      */
+     private static void writeJVMCodeToFile(String moduleName, String instructions)
+     {
+         BufferedWriter out = null;
+         try
+         {
+             out = new BufferedWriter(new FileWriter("Tests with yal files/Ficheiros .j gerados pelo nosso compiler/" + moduleName + ".j"));
+             out.write(instructions);
+         } catch (IOException e)
+         {
+             System.out.println("Can't write file with compiled jvm code.");
+         } finally
+         {
+             try
+             {
+                 out.close();
+             } catch (IOException e)
+             {
+                 e.printStackTrace();
+             }
+         }
+     }
+
+
+static void jjtreeOpenNodeScope(Node n)
+{
+    ((SimpleNode)n).setLine( getToken(1).beginLine ) ;
+}
+static void jjtreeCloseNodeScope(Node n)
+{
+
+}
+}
+
+PARSER_END(Scanner)
+
+< DEFAULT >
+SKIP :
+{
+  " "
+| "\t"
+| "\n"
+| "\r"
+| < "//" (~[ "\n", "\r" ])*
+    (
+      "\n"
+    | "\r"
+    | "\r\n"
+    ) >
+| < "/*" (~[ "*" ])* "*"
+    (
+      "*"
+    | ~[ "*", "/" ] (~[ "*" ])* "*"
+    )*
+    "/" >
+}
+
+/* reserved words */
+< DEFAULT >
+TOKEN :
+{
+  < RELA_OP :
+    ">"
+  | "<"
+  | "<="
+  | ">="
+  | "=="
+  | "!=" >
+| < ADDSUB_OP :
+    "+"
+  | "-" >
+| < ARITH_OP :
+    "*"
+  | "/"
+  | "<<"
+  | ">>"
+  | ">>>" >
+| < BITWISE_OP :
+    "&"
+  | "|"
+  | "^" >
+| < NOT_OP : "!" >
+| < WHILE : "while" >
+| < IF : "if" >
+| < ELSE : "else" >
+| < ASSIGN : "=" >
+| < ASPA : "\"" >
+| < LPAR : "(" >
+| < RPAR : ")" >
+| < VIRG : "," >
+| < PVIRG : ";" >
+| < LCHAVETA : "{" >
+| < RCHAVETA : "}" >
+| < FUNCTION : "function" >
+| < MODULE : "module" >
+| < SIZE : "size" >
+}
+
+< DEFAULT >
+TOKEN :
+{
+  < INTEGER : (< DIGIT >)+ >
+| < ID :
+    < LETTER >
+    (
+      < LETTER >
+    | < DIGIT >
+    )* >
+| < #LETTER : [ "$", "A"-"Z", "_", "a"-"z" ] >
+| < #DIGIT : [ "0"-"9" ] >
+| < STRING : "\"" ([ "a"-"z", "A"-"Z", "0"-"9", ":", " ", "=" ])+ "\"" >
+}
+
+SimpleNode Module() :
+{
+  Token moduleName;
+}
+{
+  try
+  {
+    < MODULE > moduleName = < ID > < LCHAVETA >
+    {
+      jjtThis.moduleName = moduleName.image;
+    }
+    (
+    Declaration()
+    ) * 
+    (
+    Function()
+    ) * 
+    < RCHAVETA >
+  }
+  catch (ParseException e)
+  {
+    System.out.println("Module Err:" + e.toString());
+    parse_error = true;
+  }
+  {
+    return jjtThis;
+  }
+}
+
+void Declaration() :
+{
+  Token t1;
+  Token op;
+}
+{
+  (
+    LOOKAHEAD(2)
+    ArrayElement()
+  | ScalarElement()
+    )
+    try
+    {
+      (< ASSIGN > (("[" ArraySize() "]")
+    | (op = < ADDSUB_OP >
+      {
+        jjtThis.addSubOp = op.image;
+      }
+      ) ? t1 = < INTEGER >
+      {
+        jjtThis.assignValue = Integer.parseInt(t1.image);
+      }
+      )) ? < PVIRG >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Declaration Err on right hand side of equal sign:" + e.toString());
+      parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != PVIRG);
+    }
+  }
+
+  void Function() :
+  {
+    Token funcID;
+  }
+  {
+    try
+    {
+      < FUNCTION > 
+      (LOOKAHEAD(2)
+      (
+      LOOKAHEAD(2)
+      ArrayElement()
+    | ScalarElement()) 
+      < ASSIGN > funcID = < ID >
+      {
+        jjtThis.functionId = funcID.image;
+      }
+    | (funcID = < ID >)
+      {
+        jjtThis.functionId = funcID.image;
+      }
+      )
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Function Err:" + e.toString());
+      parse_error = true;
+      Token t;
+      t = getToken(1);
+      while (t.kind != LPAR)
+      {
+        getNextToken();
+        t = getToken(1);
+      }
+    }
+    try
+    {
+      < LPAR > (Varlist()) ? < RPAR >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Function Err:" + e.toString());
+      parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != RPAR);
+    }
+    try
+    {
+      < LCHAVETA > Stmtlst() < RCHAVETA >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Function Err:" + e.toString());
+      parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != RCHAVETA);
+    }
+  }
+
+  void Varlist() :
+  {}
+  {
+    (
+      LOOKAHEAD(2)
+      ArrayElement()
+    | ScalarElement()
+    )
+    (
+      < VIRG >
+      (
+        LOOKAHEAD(2)
+        ArrayElement()
+      | ScalarElement()
+      )
+    )*
+  }
+
+  void ArrayElement() :
+  {
+    Token arrayID;
+  }
+  {
+    try
+    {
+      arrayID = < ID > "[" "]"
+      {
+        jjtThis.arrayID = arrayID.image;
+      }
+    }
+    catch (ParseException e)
+    {
+      System.out.println("ArrayElement Err:" + e.toString());
+      parse_error = true;
+    }
+  }
+
+  void ScalarElement() :
+  {
+    Token scalarID;
+  }
+  {
+    try
+    {
+      scalarID = < ID >
+      {
+        jjtThis.scalarID = scalarID.image;
+      }
+    }
+    catch (ParseException e)
+    {
+      System.out.println("ScalarElement Err:" + e.toString());
+      Scanner.parse_error = true;
+    }
+  }
+
+  void Stmtlst() :
+  {}
+  {
+    try
+    {
+      (LOOKAHEAD({ getToken(1).kind != RCHAVETA })
+      Stmt()) *
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Stmtlst Err:" + e.toString());
+      Scanner.parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != PVIRG);
+    }
+  }
+
+  void Stmt() :
+  {}
+  {
+    try
+    {
+      While()
+    | If()
+    | LOOKAHEAD(3)
+      Assign()
+    | Call() < PVIRG >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Stmt Err:" + e.toString());
+      Scanner.parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+        if (t.kind == LCHAVETA)
+        {
+          ErrorBlock();
+          break;
+        }
+      }
+      while (t.kind != PVIRG && t.kind != RCHAVETA);
+    }
+  }
+
+  void ErrorBlock() :
+  {}
+  {
+    try
+    {
+      Stmtlst() < RCHAVETA >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Stmt Err:" + e.toString());
+      Scanner.parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != RCHAVETA);
+    }
+  }
+
+  void Assign() :
+  {}
+  {
+    try
+    {
+      Lhs() < ASSIGN > Rhs() < PVIRG >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Assign Err:" + e.toString());
+      Scanner.parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != PVIRG);
+    }
+  }
+
+  void Lhs() :
+  {}
+  {
+    (
+      LOOKAHEAD(2)
+      ArrayAccess()
+    | ScalarAccess()
+    )
+  }
+
+  void Rhs() :
+  {
+    Token op;
+  }
+  {
+    (
+      Term()
+      (
+        (
+          LOOKAHEAD(3)
+          op = < ARITH_OP >
+          {
+            jjtThis.op = op.image;
+          }
+        | op = < BITWISE_OP >
+          {
+            jjtThis.op = op.image;
+          }
+        | op = < ADDSUB_OP >
+          {
+            jjtThis.op = op.image;
+          }
+        )
+        Term()
+      )?
+    )
+  | "[" ArraySize() "]"
+  }
+
+  void ArraySize() :
+  {
+    Token t1;
+  }
+  {
+    try
+    {
+      ScalarAccess()
+    | t1 = < INTEGER >
+      {
+        jjtThis.sizeArray = Integer.parseInt(t1.image);
+      }
+    }
+    catch (ParseException e)
+    {
+      System.out.println("ArraySize Err:" + e.toString());
+      Scanner.parse_error = true;
+    }
+  }
+
+  void Term() :
+  {
+    Token t1, t2;
+  }
+  {
+    (t1 = < ADDSUB_OP >
+    {
+      jjtThis.addSub_Op = t1.image;
+    }
+    )?
+    (
+      t2 = < INTEGER >
+      {
+        jjtThis.termInt = Integer.parseInt(t2.image);
+      }
+    | LOOKAHEAD(3)
+      Call()
+    | LOOKAHEAD(3)
+      ArrayAccess()
+    | ScalarAccess()
+    )
+  }
+
+  void Exprtest() :
+  {
+    Token t1;
+  }
+  {
+    try
+    {
+      < LPAR > Lhs() t1 = < RELA_OP >
+      {
+        jjtThis.rela_Op = t1.image;
+      }
+      Rhs() < RPAR >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Exprtest Err:" + e.toString());
+      Scanner.parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != RPAR);
+    }
+  }
+
+  void While() :
+  {}
+  {
+    try
+    {
+      < WHILE > Exprtest() < LCHAVETA >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("while Err:" + e.toString());
+      Scanner.parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != LCHAVETA);
+    }
+    try
+    {
+      Stmtlst() < RCHAVETA >
+    }
+    catch (ParseException e)
+    {
+      System.out.println("while Err:" + e.toString());
+      Scanner.parse_error = true;
+      Token t;
+      do
+      {
+        t = getNextToken();
+      }
+      while (t.kind != RCHAVETA);
+    }
+  }
+
+  void If() :
+  {}
+  {
+    < IF > Exprtest() < LCHAVETA > Stmtlst() < RCHAVETA >
+    (
+      < ELSE > < LCHAVETA > Stmtlst() < RCHAVETA >
+    )?
+  }
+
+  void Call() :
+  {
+    Token outerCalledID;
+    Token innerCalledID = new Token();
+    innerCalledID.image = null;
+  }
+  {
+    outerCalledID = < ID > ("." innerCalledID = < ID >)? < LPAR >
+    (
+      ArgumentList()
+    )?
+    < RPAR >
+    {
+      jjtThis.outerCalledID = outerCalledID.image;
+      jjtThis.innerCalledID = innerCalledID.image;
+    }
+  }
+
+  void ArgumentList() :
+  {}
+  {
+    try
+    {
+      Argument() (< VIRG > Argument()) *
+    }
+    catch (ParseException e)
+    {
+      System.out.println("ArgumentList Err:" + e.toString());
+      Scanner.parse_error = true;
+    }
+  }
+
+  void Argument() :
+  {
+    Token t1;
+  }
+  {
+    try
+    {
+      (t1 = < ID >
+      {
+        jjtThis.id = t1.image;
+      }
+    | t1 = < STRING >
+      {
+        jjtThis.str = t1.image;
+      }
+    | t1 = < INTEGER >
+      {
+        jjtThis.intr = Integer.parseInt(t1.image);
+      }
+      )
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Argument Err:" + e.toString());
+      Scanner.parse_error = true;
+    }
+  }
+
+  void ArrayAccess() :
+  {
+    Token arrayID;
+  }
+  {
+    try
+    {
+      arrayID = < ID > "[" Index() "]"
+      {
+        jjtThis.arrayID = arrayID.image;
+      }
+    }
+    catch (ParseException e)
+    {
+      System.out.println("ArrayAccess Err:" + e.toString());
+      Scanner.parse_error = true;
+    }
+  }
+
+  void ScalarAccess() :
+  {
+    Token id, size;
+  }
+  {
+    try
+    {
+      id = < ID >
+      {
+        jjtThis.id = id.image;
+      }
+      ("." size = < SIZE >
+      {
+        jjtThis.size = size.image;
+      }
+      ) ?
+    }
+    catch (ParseException e)
+    {
+      System.out.println("ScalarAccess Err:" + e.toString());
+      Scanner.parse_error = true;
+    }
+  }
+
+  void Index() :
+  {
+    Token t1;
+  }
+  {
+    try
+    {
+      t1 = < ID >
+      {
+        jjtThis.id = t1.image;
+      }
+    | t1 = < INTEGER >
+      {
+        jjtThis.index = Integer.parseInt(t1.image);
+      }
+    }
+    catch (ParseException e)
+    {
+      System.out.println("Index Err:" + e.toString());
+      Scanner.parse_error = true;
+    }
+  }
